@@ -37,7 +37,7 @@ namespace Discord.Net.Queue
             else if (request.Options.IsGatewayBucket)
                 WindowCount = GatewayBucket.Get(request.Options.BucketId).WindowCount;
             else
-                WindowCount = 1; //Only allow one request until we get a header back
+                WindowCount = request.Options.UseInternalRatelimiting ?? false ? 2 : 1; //Only allow one request until we get a header back
             _semaphore = WindowCount;
             _resetTick = null;
             LastAttemptAt = DateTimeOffset.UtcNow;
@@ -65,7 +65,9 @@ namespace Discord.Net.Queue
                 try
                 {
                     var response = await request.SendAsync().ConfigureAwait(false);
-                    info = new RateLimitInfo(response.Headers);
+                    info = new RateLimitInfo(response.Headers, request.Endpoint);
+
+                    request.Options.ExecuteRatelimitCallback(info);
 
                     if (response.StatusCode < (HttpStatusCode)200 || response.StatusCode >= (HttpStatusCode)300)
                     {
@@ -86,7 +88,7 @@ namespace Discord.Net.Queue
 #endif
                                     UpdateRateLimit(id, request, info, true);
                                 }
-                                await _queue.RaiseRateLimitTriggered(Id, info, $"{request.Method} {request.Endpoint}").ConfigureAwait(false);
+                                await _queue.RaiseRateLimitTriggered(Id, info, request, $"{request.Method} {request.Endpoint}").ConfigureAwait(false);
                                 continue; //Retry
                             case HttpStatusCode.BadGateway: //502
 #if DEBUG_LIMITS
@@ -246,7 +248,7 @@ namespace Discord.Net.Queue
 
                 DateTimeOffset? timeoutAt = request.TimeoutAt;
                 int semaphore = Interlocked.Decrement(ref _semaphore);
-                if (windowCount > 0 && semaphore < 0)
+                if (windowCount > 0 && (request.Options.UseInternalRatelimiting ?? false ? semaphore <= 0 : semaphore < 0))
                 {
                     if (!isRateLimited)
                     {
@@ -255,7 +257,7 @@ namespace Discord.Net.Queue
                         switch (request)
                         {
                             case RestRequest restRequest:
-                                await _queue.RaiseRateLimitTriggered(Id, null, $"{restRequest.Method} {restRequest.Endpoint}").ConfigureAwait(false);
+                                await _queue.RaiseRateLimitTriggered(Id, null, restRequest, $"{restRequest.Method} {restRequest.Endpoint}").ConfigureAwait(false);
                                 break;
                             case WebSocketRequest webSocketRequest:
                                 if (webSocketRequest.IgnoreLimit)
@@ -263,7 +265,7 @@ namespace Discord.Net.Queue
                                     ignoreRatelimit = true;
                                     break;
                                 }
-                                await _queue.RaiseRateLimitTriggered(Id, null, Id.Endpoint).ConfigureAwait(false);
+                                await _queue.RaiseRateLimitTriggered(Id, null, webSocketRequest, Id.Endpoint).ConfigureAwait(false);
                                 break;
                             default:
                                 throw new InvalidOperationException("Unknown request type");

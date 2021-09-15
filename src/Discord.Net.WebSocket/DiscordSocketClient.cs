@@ -190,7 +190,7 @@ namespace Discord.WebSocket
             _largeGuilds = new ConcurrentQueue<ulong>();
         }
         private static API.DiscordSocketApiClient CreateApiClient(DiscordSocketConfig config)
-            => new API.DiscordSocketApiClient(config.RestClientProvider, config.WebSocketProvider, DiscordRestConfig.UserAgent, config.GatewayHost);
+            => new API.DiscordSocketApiClient(config.RestClientProvider, config.WebSocketProvider, DiscordRestConfig.UserAgent, config.GatewayHost, useInternalRatelimiting: config.UseInternalRatelimiting);
         /// <inheritdoc />
         internal override void Dispose(bool disposing)
         {
@@ -2243,10 +2243,25 @@ namespace Discord.WebSocket
                                         return;
                                     }
 
-                                    var channel = (SocketThreadChannel)guild.GetChannel(data.Id);
+                                    var threadChannel = guild.ThreadChannels.FirstOrDefault(x => x.Id == data.Id);
+                                    var before = threadChannel != null
+                                        ? new Cacheable<SocketThreadChannel, ulong>(threadChannel.Clone(), data.Id, true, () => Task.FromResult((SocketThreadChannel)null))
+                                        : new Cacheable<SocketThreadChannel, ulong>(null, data.Id, false, () => Task.FromResult((SocketThreadChannel)null));
 
-                                    var before = channel.Clone();
-                                    channel.Update(State, data);
+                                    if (threadChannel != null)
+                                    {
+                                        threadChannel.Update(State, data);
+
+                                        if (data.ThreadMember.IsSpecified)
+                                            threadChannel.AddOrUpdateThreadMember(data.ThreadMember.Value, guild.CurrentUser);
+                                    }
+                                    else
+                                    {
+                                        // Thread is updated but was not cached, likely meaning the thread was unarchived.
+                                        threadChannel = (SocketThreadChannel)guild.AddChannel(State, data);
+                                        if (data.ThreadMember.IsSpecified)
+                                            threadChannel.AddOrUpdateThreadMember(data.ThreadMember.Value, guild.CurrentUser);
+                                    }
 
                                     if (!(guild?.IsSynced ?? true))
                                     {
@@ -2254,7 +2269,7 @@ namespace Discord.WebSocket
                                         return;
                                     }
 
-                                    await TimedInvokeAsync(_threadUpdated, nameof(ThreadUpdated), before, channel).ConfigureAwait(false);
+                                    await TimedInvokeAsync(_threadUpdated, nameof(ThreadUpdated), before, threadChannel).ConfigureAwait(false);
                                 }
                                 break;
                             case "THREAD_DELETE":
